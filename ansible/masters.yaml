@@ -1,0 +1,102 @@
+- hosts: all
+  become: yes
+  become_method: sudo
+  tasks:
+  - name: Download kube api/cm/schd/ctl
+    get_url:
+      url: "{{ item }}"
+      dest: /home/ubuntu/
+    with_items:
+    - https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kube-apiserver
+    - https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kube-controller-manager
+    - https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kube-scheduler
+    - https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kubectl
+  
+  - name: Move kube* to bin
+    copy: 
+      src: "{{ item }}"
+      dest: /usr/local/bin/
+      mode: a+x
+      remote_src: yes
+    with_items:
+      - kube-apiserver
+      - kube-controller-manager
+      - kube-scheduler
+      - kubectl
+
+  - name: Creates directories
+    file:
+      path: "{{ item }}"
+      state: directory
+    with_items:
+      - /etc/kubernetes/config
+      - /var/lib/kubernetes 
+  
+  - name: Move certs
+    copy: 
+      src: "{{ item }}"
+      dest: /var/lib/kubernetes
+      remote_src: yes
+    with_items:
+      - ca.pem 
+      - kubernetes.pem
+      - kubernetes-key.pem
+      - ca-key.pem 
+      - service-account.pem
+      - service-account-key.pem
+      - encryption-config.yaml
+      - kube-controller-manager.kubeconfig
+      - kube-scheduler.kubeconfig
+  
+  - name: Get INTERNAL_IP 
+    shell:
+      cmd: curl -s http://169.254.169.254/latest/meta-data/local-ipv4 > INTERNAL_IP.txt
+      warn: false
+
+  - name: Move 2files to remote
+    copy: 
+      src: "{{ item }}" 
+      dest: /home/ubuntu/
+    with_items:
+        - script/masters.sh  
+        - script/clusterRole.txt
+    
+  - name: Create kube* services
+    become: true
+    shell: sh masters.sh
+
+  - name: Reload system deamon
+    become: true
+    systemd:
+      daemon_reload: yes
+  
+  - name: Enable kube* services
+    become: true
+    service:
+      name: "{{ item }}"
+      enabled: yes
+    with_items:
+      - kube-apiserver 
+      - kube-controller-manager
+      - kube-scheduler
+
+  - name: Start kube* services
+    become: true
+    service:
+      name: "{{ item }}"
+      state: started
+    with_items:
+      - kube-apiserver 
+      - kube-controller-manager
+      - kube-scheduler
+
+  - name: Create kube roles
+    become: true
+    shell: kubectl apply --kubeconfig admin.kubeconfig -f clusterRole.txt   
+
+  - name: Clean old files
+    become: true
+    shell: rm -fr *
+    
+      
+

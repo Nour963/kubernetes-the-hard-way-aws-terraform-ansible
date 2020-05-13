@@ -1,0 +1,152 @@
+- hosts: all
+  become: yes
+  become_method: sudo
+  tasks:
+
+  - name: Create directories
+    file:
+      path: "{{ item }}"
+      state: directory
+    with_items:
+    - /etc/cni/net.d
+    - /opt/cni/bin
+    - /var/lib/kubelet
+    - /var/lib/kube-proxy
+    - /var/lib/kubernetes
+    - /var/run/kubernetes
+    - /home/ubuntu/containerd
+
+  - name: Download workers apps
+    get_url:
+      url: "{{ item.url }}"
+      dest: "{{ item.dest }}"
+    with_items:
+    - { url: 'https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kubectl', dest: '/home/ubuntu' }
+    - { url: 'https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kube-proxy', dest: '/home/ubuntu' }
+    - { url: 'https://storage.googleapis.com/kubernetes-release/release/v1.15.3/bin/linux/amd64/kubelet', dest: '/home/ubuntu' }
+    - { url: 'https://github.com/opencontainers/runc/releases/download/v1.0.0-rc8/runc.amd64', dest: '/home/ubuntu' }
+    - { url: 'https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.15.0/crictl-v1.15.0-linux-amd64.tar.gz', dest: '/home/ubuntu' }
+    - { url: 'https://github.com/containerd/containerd/releases/download/v1.2.9/containerd-1.2.9.linux-amd64.tar.gz', dest: '/home/ubuntu/containerd' }
+    - { url: 'https://github.com/containernetworking/plugins/releases/download/v0.8.2/cni-plugins-linux-amd64-v0.8.2.tgz', dest: '/opt/cni/bin' }
+    
+  - name: Extract tar
+    become: yes
+    unarchive:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      remote_src: yes
+    with_items:
+    - { src: 'crictl-v1.15.0-linux-amd64.tar.gz', dest: '/home/ubuntu' }
+    - { src: '/home/ubuntu/containerd/containerd-1.2.9.linux-amd64.tar.gz', dest: '/home/ubuntu/containerd' }
+    - { src: '/opt/cni/bin/cni-plugins-linux-amd64-v0.8.2.tgz', dest: '/opt/cni/bin' }  
+
+  - name: Rename runc
+    copy: 
+      src: runc.amd64
+      dest: runc
+      remote_src: yes
+
+  - name: Move kube* to bin
+    become: yes
+    copy: 
+      src: "{{ item }}"
+      dest: /usr/local/bin/
+      mode: a+x
+      remote_src: yes
+    with_items:
+      - crictl
+      - kube-proxy
+      - kubelet
+      - kubectl
+      - runc
+
+  - name: Install apps
+    apt:
+      name: ['socat','conntrack','ipset']
+      update_cache: yes
+    
+  - name: Turne off Swape
+    become: true
+    shell: swapoff -a 
+ 
+  - name: Get containerd/bin/ file names to copy
+    command: "find containerd/bin -type f"
+    register: files_to_copy
+
+  - name: Move containersd files
+    copy:
+      src: "{{ item }}" 
+      dest: "/bin/"
+      mode: a+x
+      remote_src: True
+    with_items:
+       - "{{ files_to_copy.stdout_lines }}"
+
+  - name: Get POD_CIDR and WORKER_NAME
+    shell:
+      cmd: "{{ item }}"
+      warn: false
+    with_items:
+        - curl -s http://169.254.169.254/latest/user-data/ | tr "|" "\n" | grep "^pod-cidr" | cut -d"=" -f2 > POD_CIDR.txt
+        - curl -s http://169.254.169.254/latest/user-data/ | tr "|" "\n" | grep "^name" | cut -d"=" -f2 > WORKER_NAME.txt
+
+  - name: Move workers.sh to remote
+    copy: 
+      src: script/workers.sh 
+      dest: /home/ubuntu/
+
+  - name: Register WORKER_NAME
+    command: "cat WORKER_NAME.txt"
+    register: WORKER_NAME
+    
+  - name: Move WORKER_NAME-* files
+    copy: 
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      remote_src: yes
+    with_items:
+      - { src: "{{ WORKER_NAME.stdout }}-key.pem", dest: '/var/lib/kubelet/' }
+      - { src: "{{ WORKER_NAME.stdout }}.pem", dest: '/var/lib/kubelet/' }
+      - { src: "{{ WORKER_NAME.stdout }}.kubeconfig", dest: '/var/lib/kubelet/kubeconfig' }
+          
+  - name: Create services
+    become: true
+    shell: sh workers.sh
+
+  - name: Move to /var/lib/* 
+    copy: 
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      remote_src: yes
+    with_items:
+      - { src: 'ca.pem', dest: '/var/lib/kubernetes/' }
+      - { src: 'kube-proxy.kubeconfig', dest: '/var/lib/kube-proxy/kubeconfig' }
+
+  - name: Reload system deamon
+    become: true
+    systemd:
+      daemon_reload: yes
+    
+  - name: Enable kube* services
+    become: true
+    service:
+      name: "{{ item }}"
+      enabled: yes
+    with_items:
+      - containerd 
+      - kubelet
+      - kube-proxy
+  
+  - name: Start kube* services
+    become: true
+    service:
+      name: "{{ item }}"
+      state: started
+    with_items:
+      - containerd 
+      - kubelet
+      - kube-proxy
+    
+  - name: Clean old files
+    become: true
+    shell: rm -fr *
